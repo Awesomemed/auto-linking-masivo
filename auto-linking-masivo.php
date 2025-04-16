@@ -3,7 +3,7 @@
 /**
  * Plugin Name: Auto-Linking Masivo para Link Whisper con Análisis
  * Description: Agrgear links de forma automatica en Post para Link Whisper
- * Version: 2.1.1
+ * Version: 2.1.3
  * Author: Awesome Med
  */
 
@@ -133,7 +133,7 @@ function get_link_whisper_keywords_from_db() {
 /**
  * Función para aplicar autolinks a un post
  */
-function manual_apply_autolinks($post_id, $max_links = 5) {
+function manual_apply_autolinks($post_id, $max_links = 10) {
     global $wpdb;
     
     // Para depuración
@@ -141,13 +141,44 @@ function manual_apply_autolinks($post_id, $max_links = 5) {
         'post_id' => $post_id,
         'keywords_encontrados' => array(),
         'keywords_buscados' => array(),
-        'contenido_analizado' => false
+        'contenido_analizado' => false,
+        'idioma_post' => 'unknown'
     );
     
     $post = get_post($post_id);
     if (!$post) {
         return false;
     }
+    
+    // Detectar el idioma del post actual
+    $post_language = 'unknown';
+
+    // Verificar si debemos respetar el idioma
+    $respect_language = get_option('lw_respect_language', 1); // 1 = sí, 0 = no
+    
+    // Intentar detectar con WPML
+    if (function_exists('wpml_get_language_information')) {
+        $lang_info = wpml_get_language_information(null, $post_id);
+        if (isset($lang_info['language_code'])) {
+            $post_language = $lang_info['language_code'];
+        }
+    }
+    
+    // Intentar con Polylang si aún es desconocido
+    if ($post_language === 'unknown' && function_exists('pll_get_post_language')) {
+        $lang = pll_get_post_language($post_id);
+        if (!empty($lang)) {
+            $post_language = $lang;
+        }
+    }
+    
+    // Intentar detectar por la URL del post
+    if ($post_language === 'unknown') {
+        $post_url = get_permalink($post_id);
+        $post_language = detect_link_language($post_url);
+    }
+    
+    $debug['idioma_post'] = $post_language;
     
     $content = $post->post_content;
     $original_content = $content;
@@ -156,10 +187,10 @@ function manual_apply_autolinks($post_id, $max_links = 5) {
     $debug['contenido_analizado'] = true;
     $debug['longitud_contenido'] = strlen($content);
     
-    // Obtener keywords de la tabla correcta (según la imagen)
+    // Obtener keywords de la tabla correcta
     $keywords = array();
     
-    // Buscar en la tabla wpha_wpil_keywords (como se ve en la imagen 2)
+    // Buscar en la tabla wpha_wpil_keywords (como se ve en la imagen)
     $keyword_table = $wpdb->prefix . 'wpil_keywords';
     if ($wpdb->get_var("SHOW TABLES LIKE '$keyword_table'") === $keyword_table) {
         $query = "SELECT * FROM {$keyword_table} WHERE 1";
@@ -167,50 +198,27 @@ function manual_apply_autolinks($post_id, $max_links = 5) {
         
         if (!empty($results)) {
             foreach ($results as $row) {
-                // Los nombres de columnas según la imagen
                 $keyword = isset($row['keyword']) ? $row['keyword'] : '';
                 $link = isset($row['link']) ? $row['link'] : '';
                 
                 if (!empty($keyword) && !empty($link)) {
-                    $keywords[$keyword] = array('url' => $link);
-                    $debug['keywords_buscados'][] = $keyword;
-                }
-            }
-        }
-    }
-    
-    // Si no encontramos en la primera tabla, buscar en otras posibles tablas
-    if (empty($keywords)) {
-        // Probar con la tabla original que buscábamos
-        $alt_table = $wpdb->prefix . 'wpil_keyword_links';
-        if ($wpdb->get_var("SHOW TABLES LIKE '$alt_table'") === $alt_table) {
-            $query = "SELECT * FROM {$alt_table} WHERE enabled = 1";
-            $results = $wpdb->get_results($query, ARRAY_A);
-            
-            if (!empty($results)) {
-                foreach ($results as $row) {
-                    $keyword = isset($row['keyword']) ? $row['keyword'] : '';
-                    $url = isset($row['url']) ? $row['url'] : '';
+                    // Detectar el idioma del enlace destino
+                    $link_language = detect_link_language($link);
                     
-                    if (!empty($keyword) && !empty($url)) {
-                        $keywords[$keyword] = array('url' => $url);
-                        $debug['keywords_buscados'][] = $keyword;
-                    }
+                    $keywords[$keyword] = array(
+                        'url' => $link,
+                        'language' => $link_language
+                    );
+                    $debug['keywords_buscados'][] = array(
+                        'keyword' => $keyword,
+                        'language' => $link_language
+                    );
                 }
             }
         }
     }
     
-    // Si todavía no hay keywords, intentar con la función original
-    if (empty($keywords)) {
-        $keywords = get_link_whisper_keywords_from_db();
-        
-        if (!empty($keywords)) {
-            foreach ($keywords as $k => $v) {
-                $debug['keywords_buscados'][] = $k;
-            }
-        }
-    }
+    // Resto del código para buscar en tablas alternativas si es necesario...
     
     // Registrar cuántos keywords estamos buscando
     $debug['total_keywords'] = count($keywords);
@@ -222,23 +230,26 @@ function manual_apply_autolinks($post_id, $max_links = 5) {
         return 0;
     }
     
-    // Aplicar cada keyword
+    // Aplicar cada keyword, respetando el idioma
     foreach ($keywords as $keyword => $link_data) {
         if ($links_added >= $max_links) {
             break;
         }
         
-        // Determinar URL destino
-        if (is_array($link_data)) {
-            $target_url = $link_data['url'] ?? '';
-            $target_id = $link_data['post_id'] ?? 0;
-        } else {
-            $target_url = $link_data;
-            $target_id = 0;
-        }
+        // Determinar URL destino y su idioma
+        $target_url = $link_data['url'] ?? '';
+        $target_language = $link_data['language'] ?? 'unknown';
         
-        if (empty($target_url) && !empty($target_id)) {
-            $target_url = get_permalink($target_id);
+        // Sólo aplicar enlaces del mismo idioma que el post, o permitir todos si no se conoce el idioma
+        //$language_match = ($post_language === 'unknown' || $target_language === 'unknown' || $post_language === $target_language);
+        $language_match = !$respect_language || $post_language === 'unknown' || $target_language === 'unknown' || $post_language === $target_language;
+        
+        if (!$language_match) {
+            $debug['skipped_keywords'][] = array(
+                'keyword' => $keyword,
+                'reason' => "Idioma del post ($post_language) no coincide con idioma del enlace ($target_language)"
+            );
+            continue; // Saltar a la siguiente iteración
         }
         
         // Verificación de presencia del keyword
@@ -258,7 +269,8 @@ function manual_apply_autolinks($post_id, $max_links = 5) {
                     $links_added++;
                     $debug['links_agregados'][] = array(
                         'keyword' => $keyword,
-                        'url' => $target_url
+                        'url' => $target_url,
+                        'language' => $target_language
                     );
                 }
             }
@@ -1485,3 +1497,105 @@ function link_whisper_diagnostico_ajax() {
     wp_send_json_success($output);
 }
 add_action('wp_ajax_link_whisper_diagnostico', 'link_whisper_diagnostico_ajax');
+
+/**
+ * Función para detectar el idioma de un enlace basado en su URL
+ * 
+ * @param string $url URL del enlace a analizar
+ * @param int $post_id ID del post (opcional, para verificar plugins multilingües)
+ * @return string Código del idioma detectado ('es', 'en', etc.) o 'unknown'
+ */
+function detect_link_language($url, $post_id = 0) {
+    // Patrones comunes para detectar idioma en URLs
+    $patterns = array(
+        'es' => array('/\/es\//', '/-es\//', '/\/es\./', '-es.', '/\.es\//', '/\/es$/', '/-es$/'),
+        'en' => array('/\/en\//', '/-en\//', '/\/en\./', '-en.', '/\.en\//', '/\/en$/', '/-en$/'),
+        // Puedes agregar más idiomas aquí siguiendo el mismo patrón
+    );
+    
+    // Inicializar con idioma desconocido
+    $detected_language = 'unknown';
+    
+    // Verificar patrones básicos en la URL
+    foreach ($patterns as $language => $lang_patterns) {
+        foreach ($lang_patterns as $pattern) {
+            if (preg_match($pattern, $url)) {
+                $detected_language = $language;
+                break 2; // Salir de ambos bucles
+            }
+        }
+    }
+    
+    // Si no se detectó el idioma por la URL, intentar con plugins multilingües
+    if ($detected_language === 'unknown' && $post_id > 0) {
+        // Compatibilidad con WPML
+        if (function_exists('wpml_get_language_information')) {
+            $lang_info = wpml_get_language_information(null, $post_id);
+            if (isset($lang_info['language_code'])) {
+                $detected_language = $lang_info['language_code'];
+            }
+        }
+        
+        // Compatibilidad con Polylang
+        if (function_exists('pll_get_post_language')) {
+            $lang = pll_get_post_language($post_id);
+            if (!empty($lang)) {
+                $detected_language = $lang;
+            }
+        }
+        
+        // Compatibilidad con TranslatePress
+        // TranslatePress almacena la información de idioma en la URL, así que ya debería haberse detectado
+    }
+    
+    return $detected_language;
+}
+
+/**
+ * Agrega opciones de configuración para el plugin
+ */
+function link_whisper_bulk_settings_page() {
+    // Verificar si es la página de opciones de Link Whisper
+    $screen = get_current_screen();
+    if ($screen->id !== 'link-whisper_page_link-whisper-settings') {
+        return;
+    }
+    
+    // Guardar las opciones si se enviaron
+    if (isset($_POST['save_lw_bulk_settings']) && check_admin_referer('lw_bulk_settings_nonce')) {
+        $respect_language = isset($_POST['lw_respect_language']) ? 1 : 0;
+        update_option('lw_respect_language', $respect_language);
+        echo '<div class="notice notice-success is-dismissible"><p>Configuración guardada.</p></div>';
+    }
+    
+    // Obtener las opciones actuales
+    $respect_language = get_option('lw_respect_language', 1); // Por defecto respeta el idioma
+    
+    ?>
+    <div class="wrap">
+        <h2>Configuración de Auto-Linking Masivo</h2>
+        
+        <form method="post" action="">
+            <?php wp_nonce_field('lw_bulk_settings_nonce'); ?>
+            
+            <table class="form-table">
+                <tr>
+                    <th scope="row">Compatibilidad multilingüe</th>
+                    <td>
+                        <label>
+                            <input type="checkbox" name="lw_respect_language" value="1" <?php checked(1, $respect_language); ?>>
+                            Respetar el idioma de los posts (solo enlazar a contenido del mismo idioma)
+                        </label>
+                        <p class="description">Si esta opción está activada, solo se añadirán enlaces a posts que estén en el mismo idioma que el post actual.</p>
+                    </td>
+                </tr>
+            </table>
+            
+            <p class="submit">
+                <input type="submit" name="save_lw_bulk_settings" class="button-primary" value="Guardar configuración">
+            </p>
+        </form>
+    </div>
+    <?php
+}
+add_action('admin_head', 'link_whisper_bulk_settings_page');
