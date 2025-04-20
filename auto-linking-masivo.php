@@ -2,8 +2,8 @@
 
 /**
  * Plugin Name: Auto-Linking Masivo para Link Whisper con Análisis
- * Description: Agrgear links de forma automatica en Post para Link Whisper
- * Version: 2.1.3
+ * Description: Agregar links de forma automática en Post para Link Whisper
+ * Version: 2.2.1
  * Author: Awesome Med
  */
 
@@ -287,6 +287,57 @@ function manual_apply_autolinks($post_id, $max_links = 10) {
     
     // Guardar el log de debug para este post
     $debug['total_links_agregados'] = $links_added;
+    update_post_meta($post_id, '_autolink_debug', $debug);
+    
+    return $links_added;
+}
+
+
+/**
+ * Función para aplicar autolinks a un post solo si no tiene suficientes links internos
+ * 
+ * @param int $post_id ID del post a procesar
+ * @param int $max_links Número máximo de enlaces a agregar
+ * @param int $min_threshold Umbral mínimo de enlaces internos (si el post tiene más, no se agregarán enlaces)
+ * @return int|false Número de enlaces agregados o false si ocurre un error
+ */
+function manual_apply_autolinks_if_needed($post_id, $max_links = 10, $min_threshold = 0) {
+    // Primero, analizar el post para ver si ya tiene enlaces internos
+    $post_analysis = analyze_post_internal_links($post_id);
+    
+    // Para depuración
+    $debug = array(
+        'post_id' => $post_id,
+        'fecha_analisis' => current_time('mysql'),
+        'internal_links_count' => $post_analysis ? $post_analysis['internal_links_count'] : 0,
+        'external_links_count' => $post_analysis ? $post_analysis['external_links_count'] : 0,
+        'umbral_minimo' => $min_threshold
+    );
+    
+    // Si el análisis falló o si el post ya tiene suficientes enlaces internos
+    if (!$post_analysis) {
+        $debug['skipped'] = true;
+        $debug['reason'] = 'Error al analizar el post';
+        update_post_meta($post_id, '_autolink_debug', $debug);
+        return false;
+    }
+    
+    // Verificar si el post ya tiene suficientes enlaces internos
+    if ($post_analysis['internal_links_count'] >= $min_threshold) {
+        $debug['skipped'] = true;
+        $debug['reason'] = 'El post ya tiene ' . $post_analysis['internal_links_count'] . ' enlaces internos (umbral: ' . $min_threshold . ')';
+        update_post_meta($post_id, '_autolink_debug', $debug);
+        
+        // Devolver 0 para indicar que no se agregaron enlaces
+        return 0;
+    }
+    
+    // Si no tiene suficientes enlaces internos, aplicar autolinks
+    $links_added = manual_apply_autolinks($post_id, $max_links);
+    
+    // Actualizar el debug con los resultados
+    $debug['skipped'] = false;
+    $debug['links_added'] = $links_added;
     update_post_meta($post_id, '_autolink_debug', $debug);
     
     return $links_added;
@@ -1184,7 +1235,7 @@ function link_whisper_process_batch_ajax() {
     
     // Procesar cada post
     foreach ($post_ids as $post_id) {
-        $added = manual_apply_autolinks($post_id, 5);
+        $added = manual_apply_autolinks_if_needed($post_id, 10, 3); // No agregar si ya tiene 3 o más enlaces
         
         if ($added !== false) {
             $links_added += $added;
