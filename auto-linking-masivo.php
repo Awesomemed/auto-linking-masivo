@@ -3,7 +3,7 @@
 /**
  * Plugin Name: Auto-Linking Masivo para Link Whisper con Análisis
  * Description: Agregar links de forma automática en Post para Link Whisper
- * Version: 2.2.1
+ * Version: 2.2.3
  * Author: Awesome Med
  */
 
@@ -294,7 +294,7 @@ function manual_apply_autolinks($post_id, $max_links = 10) {
 
 
 /**
- * Función para aplicar autolinks a un post solo si no tiene suficientes links internos
+ * Función para aplicar autolinks a un post publicado solo si no tiene suficientes links internos
  * 
  * @param int $post_id ID del post a procesar
  * @param int $max_links Número máximo de enlaces a agregar
@@ -302,25 +302,46 @@ function manual_apply_autolinks($post_id, $max_links = 10) {
  * @return int|false Número de enlaces agregados o false si ocurre un error
  */
 function manual_apply_autolinks_if_needed($post_id, $max_links = 10, $min_threshold = 0) {
-    // Primero, analizar el post para ver si ya tiene enlaces internos
-    $post_analysis = analyze_post_internal_links($post_id);
+    // Verificar que el post existe y está publicado
+    $post = get_post($post_id);
     
     // Para depuración
     $debug = array(
         'post_id' => $post_id,
-        'fecha_analisis' => current_time('mysql'),
-        'internal_links_count' => $post_analysis ? $post_analysis['internal_links_count'] : 0,
-        'external_links_count' => $post_analysis ? $post_analysis['external_links_count'] : 0,
-        'umbral_minimo' => $min_threshold
+        'fecha_analisis' => current_time('mysql')
     );
     
-    // Si el análisis falló o si el post ya tiene suficientes enlaces internos
+    // Verificar que el post existe
+    if (!$post) {
+        $debug['skipped'] = true;
+        $debug['reason'] = 'El post no existe';
+        update_post_meta($post_id, '_autolink_debug', $debug);
+        return false;
+    }
+    
+    // Verificar que el post está publicado
+    if ($post->post_status !== 'publish') {
+        $debug['skipped'] = true;
+        $debug['reason'] = 'El post no está publicado (estado actual: ' . $post->post_status . ')';
+        $debug['post_status'] = $post->post_status;
+        update_post_meta($post_id, '_autolink_debug', $debug);
+        return false;
+    }
+    
+    // Primero, analizar el post para ver si ya tiene enlaces internos
+    $post_analysis = analyze_post_internal_links($post_id);
+    
     if (!$post_analysis) {
         $debug['skipped'] = true;
         $debug['reason'] = 'Error al analizar el post';
         update_post_meta($post_id, '_autolink_debug', $debug);
         return false;
     }
+    
+    // Actualizar el debug con información del análisis
+    $debug['internal_links_count'] = $post_analysis['internal_links_count'];
+    $debug['external_links_count'] = $post_analysis['external_links_count'];
+    $debug['umbral_minimo'] = $min_threshold;
     
     // Verificar si el post ya tiene suficientes enlaces internos
     if ($post_analysis['internal_links_count'] >= $min_threshold) {
